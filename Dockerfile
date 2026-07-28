@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ##########  构建阶段  ##########
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir --upgrade pip build \
 
 
 ##########  运行阶段  ##########
-FROM python:3.12-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 # OCI 元数据（构建时可传入 --build-arg VERSION / VCS_REF / BUILD_DATE 覆盖默认值）
 LABEL org.opencontainers.image.source="https://github.com/zhouweico/mcp-kubevela" \
