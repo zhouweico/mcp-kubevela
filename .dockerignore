@@ -1,0 +1,40 @@
+# 版本控制（不进构建上下文）
+.git
+.gitignore
+
+# 本地环境变量（含密码，切勿打入镜像）
+.env
+.env.local
+.env.*.local
+
+# 虚拟环境 / 依赖缓存
+.venv
+venv
+env
+
+# Python 缓存 / 字节码
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+.eggs
+build
+dist
+
+# 测试 / lint 缓存（镜像只需运行时依赖）
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# 测试代码（不进生产镜像）
+tests
+
+# 项目级 memory / 本地工作目录
+.workbuddy
+
+# 临时文件
+*.log
+*.tmp
+.DS_Store

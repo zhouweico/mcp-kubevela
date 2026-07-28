@@ -1,0 +1,43 @@
+# ===== Python 缓存 / 字节码 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# ===== 测试 / lint 缓存 =====
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+
+# ===== 本地环境变量（含密码，切勿提交）=====
+.env
+.env.local
+.env.*.local
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+
+# ===== 项目级 memory / 本地工作目录（不进仓库）=====
+.workbuddy/
+
+# ===== 临时文件 =====
+*.log
+*.tmp

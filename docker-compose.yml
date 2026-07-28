@@ -1,0 +1,33 @@
+services:
+  mcp-kubevela:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mcp-kubevela:latest
+    container_name: mcp-kubevela
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8080}:8080"
+    environment:
+      # ---- MCP 传输与认证 ----
+      MCP_TRANSPORT: "${MCP_TRANSPORT:-streamable-http}"   # stdio / sse / streamable-http
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8080"
+      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-}"                # 设置后启用 Bearer Token 认证
+      MCP_LOG_LEVEL: "${MCP_LOG_LEVEL:-info}"
+      # ---- VelaUX 连接配置 ----
+      VELA_URL: "${VELA_URL:-http://localhost:8000}"
+      VELA_USERNAME: "${VELA_USERNAME:-}"
+      VELA_PASSWORD: "${VELA_PASSWORD:-}"
+      VELA_TIMEOUT: "${VELA_TIMEOUT:-30}"
+      VELA_READ_ONLY: "${VELA_READ_ONLY:-false}"
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
