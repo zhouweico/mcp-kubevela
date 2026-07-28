@@ -18,9 +18,11 @@ RUN pip install --no-cache-dir --upgrade pip build \
 ##########  运行阶段  ##########
 FROM python:3.12-slim AS runtime
 
-# OCI 元数据
-LABEL org.opencontainers.image.title="mcp-kubevela" \
+# OCI 元数据（构建时可传入 --build-arg VERSION / VCS_REF / BUILD_DATE 覆盖默认值）
+LABEL org.opencontainers.image.source="https://github.com/zhouweico/mcp-kubevela" \
+      org.opencontainers.image.title="mcp-kubevela" \
       org.opencontainers.image.description="MCP Server for KubeVela (VelaUX) application delivery (stdio/sse/streamable-http, token auth)" \
+      org.opencontainers.image.url="https://github.com/zhouweico/mcp-kubevela" \
       org.opencontainers.image.licenses="MIT"
 
 # 运行时环境变量默认值（可在 docker run / compose 中覆盖）
