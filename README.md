@@ -56,7 +56,7 @@ KubeVela MCP Server - 让 AI 助手能够查询和管理 [KubeVela](https://kube
     "kubevela": {
       "type": "stdio",
       "command": "docker",
-      "args": ["run", "-i", "--rm", "mcp-kubevela:latest"],
+      "args": ["run", "-i", "--rm", "ghcr.io/zhouweico/mcp-kubevela:latest"],
       "env": {
         "VELA_URL": "http://your-velaux:8000",
         "VELA_USERNAME": "admin",
@@ -80,7 +80,7 @@ docker run -d -p 8080:8080 \
   -e VELA_URL=http://your-velaux:8000 \
   -e VELA_USERNAME=admin \
   -e VELA_PASSWORD=your-password \
-  mcp-kubevela:latest
+  ghcr.io/zhouweico/mcp-kubevela:latest
 ```
 
 再在 Claude Code 的 `.mcp.json` 中通过 HTTP 连接：
