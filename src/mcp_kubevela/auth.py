@@ -5,7 +5,7 @@
 兼容 `X-Auth-Token: <token>` 与 `X-MCP-Token: <token>`。
 
 设计为纯 ASGI 中间件，避免依赖具体版本的 Starlette 中间件 API，
-可直接包裹 FastMCP 返回的 sse_app() / streamable_http_app()。
+可直接包裹 MCPServer 返回的 sse_app() / streamable_http_app()。
 """
 
 from __future__ import annotations

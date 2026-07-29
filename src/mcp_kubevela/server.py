@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Any, Optional, cast
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import TokenAuthMiddleware
@@ -29,7 +29,7 @@ from .render import fmt_status, render_kv, render_list, to_json
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("kubevela_mcp")
+mcp = MCPServer("kubevela_mcp")
 
 _INPUT_CONFIG = ConfigDict(
     str_strip_whitespace=True,
@@ -77,7 +77,7 @@ def _ro(title: str) -> Any:
         Any,
         {
             "title": title,
-            "readOnlyHint": True,
+            "read_only_hint": True,
             "destructiveHint": False,
             "idempotentHint": True,
             "openWorldHint": True,
@@ -91,7 +91,7 @@ def _rw(title: str, destructive: bool = False, idempotent: bool = False) -> Any:
         Any,
         {
             "title": title,
-            "readOnlyHint": False,
+            "read_only_hint": False,
             "destructiveHint": destructive,
             "idempotentHint": idempotent,
             "openWorldHint": True,
@@ -1428,15 +1428,22 @@ def _run_http(transport: str) -> None:
     host = os.getenv("MCP_HOST", "0.0.0.0")
     port = int(os.getenv("MCP_PORT", "8080"))
 
-    mcp.settings.host = host
-    mcp.settings.port = port
-
     if transport == "sse":
         app: Any = mcp.sse_app()
         endpoint = "/sse"
     else:
         app = mcp.streamable_http_app()
         endpoint = "/mcp"
+
+    # 健康检查路由：在鉴权中间件包裹之前挂载，保证无论是否开启鉴权都能探活。
+    # MCPServer 原生 app 仅暴露 /mcp（或 /sse），不含 /health。
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    async def _health(_: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
+    app.add_route("/health", _health)
 
     token = os.getenv("MCP_AUTH_TOKEN")
     if token:

@@ -54,9 +54,9 @@ async def test_readonly_annotations():
         annotations = tool.annotations
         assert annotations is not None, tool.name
         if tool.name in EXPECTED_READONLY:
-            assert annotations.readOnlyHint is True, tool.name
+            assert annotations.read_only_hint is True, tool.name
         else:
-            assert annotations.readOnlyHint is False, tool.name
+            assert annotations.read_only_hint is False, tool.name
 
 
 def test_handle_error_auth():
