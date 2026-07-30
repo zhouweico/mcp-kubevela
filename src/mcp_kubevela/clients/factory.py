@@ -19,3 +19,9 @@ async def get_vela_client() -> VelaUXClient:
 
     _cached_client = VelaUXClient()
     return _cached_client
+
+
+def reset_vela_client() -> None:
+    """重置客户端缓存。 lifespan 关闭时调用，避免返回已关闭的客户端。"""
+    global _cached_client
+    _cached_client = None

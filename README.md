@@ -10,7 +10,10 @@ KubeVela MCP Server - 让 AI 助手能够查询和管理 [KubeVela](https://kube
 - **接口认证**：HTTP 传输支持 Bearer Token 保护，未授权请求返回 `401`
 - **JWT 自动管理**：用户名/密码登录换取 accessToken，`401` 时自动 refresh / 重登录并重放请求，无需手工维护 Token
 - **KubeVela 原生概念**：直接以 `project / application / env / target / workflow / addon` 组织交付，读写一体
-- **危险操作防护**：回滚/终止工作流要求 `confirm=true` 并带 `destructiveHint` 注解；删除应用、回收环境、禁用插件等高危能力**未提供工具**，从根源上杜绝误操作
+- **危险操作防护**：回滚/终止工作流等高危操作带 `destructiveHint` 注解并通过 MRTR 确认；删除应用、回收环境、禁用插件等高危能力**未提供工具**，从根源上杜绝误操作
+- **破坏性操作 MRTR 确认**：回滚应用、终止工作流等高危操作通过 MCP 2.0 Elicitation 机制弹出确认表单，需用户明确同意后才执行；若客户端不支持 Elicitation（如 stdio 模式），则降级为直接执行
+- **MCP Resources**：以 `vela://` URI 暴露系统信息、项目列表、环境列表、集群列表等只读元数据，客户端可直接读取
+- **Stateless HTTP**：支持无状态 HTTP 模式，每次请求独立处理、无会话状态，适合 Serverless / 多副本部署
 - **灵活部署**：`uvx` 免安装运行、Docker 构建即用
 
 ## 前置准备
@@ -139,8 +142,8 @@ docker run -d -p 8080:8080 \
 | `vela_dry_run_application` | 应用 | 部署预演（只渲染不落地） | `POST .../dry-run` |
 | `vela_deploy_application` | 应用 | 触发部署（异步，返回部署记录） | `POST .../deploy` |
 | `vela_resume_workflow` | 部署与工作流 | 恢复挂起的工作流（审批放行） | `.../resume` |
-| `vela_terminate_workflow` | 部署与工作流 | 终止执行中的工作流（需 `confirm=true`） | `.../terminate` |
-| `vela_rollback_application` | 应用 | 回滚到指定版本（需 `confirm=true`） | `.../rollback` |
+| `vela_terminate_workflow` | 部署与工作流 | 终止执行中的工作流（MRTR 确认） | `.../terminate` |
+| `vela_rollback_application` | 应用 | 回滚到指定版本（MRTR 确认） | `.../rollback` |
 | `vela_create_trigger` | 触发器 | 创建 Webhook 触发器（返回 token 与触发地址） | `POST .../triggers` |
 
 > **未提供的高危操作**：删除应用、回收环境、启用/禁用插件、删除触发器**未实现为工具**，
@@ -166,6 +169,7 @@ docker run -d -p 8080:8080 \
 | `MCP_HOST` | HTTP 传输监听地址（stdio 忽略） | `0.0.0.0` |
 | `MCP_PORT` | HTTP 传输监听端口（stdio 忽略） | `8080` |
 | `MCP_AUTH_TOKEN` | 设置后启用 Bearer Token 认证，保护 HTTP 接口 | -（不鉴权） |
+| `MCP_STATELESS_HTTP` | 启用无状态 HTTP 模式，适合 Serverless 部署（详见下方说明） | `false` |
 | `MCP_LOG_LEVEL` | 日志级别：`debug`/`info`/`warning`/`error` | `info` |
 
 **VelaUX 连接**
@@ -177,6 +181,7 @@ docker run -d -p 8080:8080 \
 | `VELA_PASSWORD` | 登录密码（必填） | - |
 | `VELA_TIMEOUT` | 请求超时（秒） | `30` |
 | `VELA_READ_ONLY` | 只读模式，排除全部写工具（适合生产环境） | `false` |
+| `VELA_INSECURE` | 跳过 TLS 证书验证，用于自签名证书环境（详见下方说明） | `false` |
 
 > 认证凭证只需用户名/密码：客户端首次请求时自动调用 `POST /api/v1/auth/login`
 > 换取 accessToken / refreshToken 并缓存；收到 `401` 时先尝试 refresh 续期、
@@ -200,6 +205,23 @@ KubeVela 的交付组织层级为：**项目（project）> 应用（application�
   }
 }
 ```
+
+### TLS 证书验证
+
+本服务基于 httpx2 发起 HTTPS 请求，**默认会验证 TLS 证书**（行为与 httpx 一致）。
+
+- 在使用自签名证书或内部 CA 的环境中，HTTPS 请求会因证书校验失败而报错。此时可设置环境变量 `VELA_INSECURE=true` 跳过 TLS 证书验证。
+- 该选项适用于开发、测试等使用自签名证书的环境。
+
+```json
+{
+  "env": {
+    "VELA_INSECURE": "true"
+  }
+}
+```
+
+> **安全警告**：禁用 TLS 证书验证是不安全的，会使得 HTTPS 连接容易受到中间人攻击。**请勿在生产环境中使用**，生产环境应使用受信任的 CA 签发的有效证书。
 
 ## 多协议传输
 
@@ -231,6 +253,32 @@ Authorization: Bearer <MCP_AUTH_TOKEN>
 > `stdio` 传输为本地进程通信，不涉及网络，无需也不会进行 Token 认证。未设置 `MCP_AUTH_TOKEN` 时 HTTP 接口不鉴权，生产环境请务必配置。
 >
 > 注意区分两类凭证：`MCP_AUTH_TOKEN` 保护本 MCP Server 的 HTTP 接口；`VELA_USERNAME` / `VELA_PASSWORD` 用于登录 VelaUX API，两者互不相关。
+
+## MCP Resources
+
+本服务以 MCP 2.0 Resources 暴露只读元数据，客户端可直接通过 URI 读取，无需调用工具：
+
+| Resource URI | 说明 |
+|---|---|
+| `vela://system-info` | VelaUX 平台系统信息（版本 / 登录方式 / 集群与应用统计 / 已启用插件） |
+| `vela://projects` | 列出所有项目 |
+| `vela://envs` | 列出所有环境 |
+| `vela://clusters` | 列出所有纳管集群 |
+
+> Resources 仅暴露只读数据，不涉及任何写操作。
+
+## Stateless HTTP 模式
+
+设置 `MCP_STATELESS_HTTP=true` 可启用无状态 HTTP 模式，每次请求独立处理、不保留会话状态，适合 Serverless 平台（如 AWS Lambda、阿里云函数计算）或多副本无状态部署：
+
+```bash
+MCP_TRANSPORT=streamable-http \
+MCP_STATELESS_HTTP=true \
+MCP_HOST=0.0.0.0 MCP_PORT=8080 \
+mcp-kubevela
+```
+
+> Stateless 模式下不支持流式响应（SSE stream），每个 HTTP 请求独立完成工具调用后返回。适合短时、无状态的工具调用场景。
 
 ## 权限模型
 
@@ -408,9 +456,10 @@ prod-cluster 这个目标在哪些项目里可用？帮我确认 team-a 项目�
 ```
 （`vela_list_projects` + `vela_list_project_targets`）
 
-> 回滚 / 终止工作流等危险操作都要求二次确认：AI 首次调用会被拒绝并提示，
-> 需要用户明确同意后携带 `confirm=true` 重试，避免对话中的误操作直接落到集群。
+> 回滚 / 终止工作流等危险操作通过 MRTR 确认机制要求用户二次确认，避免对话中的误操作直接落到集群。
 > 删除应用、回收环境、启用/禁用插件等高危操作未提供工具，请在 VelaUX 控制台或 `vela` CLI 中人工执行。
+>
+> **MRTR 确认**：`vela_rollback_application` 和 `vela_terminate_workflow` 执行前会通过 MCP 2.0 Elicitation 弹出确认表单，需用户明确同意后才执行。若客户端不支持 Elicitation（如 stdio 模式），则降级为直接执行。
 
 ## 开发
 

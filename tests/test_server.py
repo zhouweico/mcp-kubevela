@@ -1,6 +1,6 @@
 """server 基础测试：工具注册、只读模式、错误处理"""
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from mcp_kubevela import server
@@ -57,6 +57,57 @@ async def test_readonly_annotations():
             assert annotations.read_only_hint is True, tool.name
         else:
             assert annotations.read_only_hint is False, tool.name
+
+
+async def test_flat_annotated_params():
+    """所有工具均使用扁平 Annotated 入参模式，不再有 params 包装对象，
+    也不应暴露 ctx 参数（MCP SDK 自动跳过 Context 类型）。"""
+    tools = await server.mcp.list_tools()
+    for tool in tools:
+        props = set(tool.input_schema.get("properties", {}).keys())
+        assert "params" not in props, f"{tool.name} 仍使用 params 包装对象"
+        assert "ctx" not in props, f"{tool.name} 暴露了 ctx 参数"
+
+
+async def test_flat_params_required_fields():
+    """抽样校验扁平参数的 required 字段与约束迁移正确。"""
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+
+    # 全部必填的工具
+    assert set(tools["vela_get_workflow_logs"].input_schema["required"]) == {
+        "app_name", "workflow_name", "record", "step"
+    }
+    # 无必填（全部带默认值）的工具
+    assert tools["vela_list_applications"].input_schema.get("required", []) == []
+    assert tools["vela_system_info"].input_schema.get("required", []) == []
+    # ctx 参数不应出现在 schema 中
+    assert "ctx" not in tools["vela_create_application"].input_schema.get("properties", {})
+
+
+async def test_flat_params_field_constraints():
+    """抽样校验 Field 约束（min_length / ge / le / pattern）已迁移到扁平参数。"""
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+
+    # app_name 的 min_length=1 约束应保留
+    app_name_schema = tools["vela_get_application"].input_schema["properties"]["app_name"]
+    assert app_name_schema.get("minLength") == 1
+    assert app_name_schema.get("maxLength") == 64
+
+    # page 的 ge=0 / page_size 的 ge=1, le=100 约束应保留
+    page_schema = tools["vela_list_revisions"].input_schema["properties"]["page"]
+    assert page_schema.get("minimum") == 0
+    page_size_schema = tools["vela_list_revisions"].input_schema["properties"]["page_size"]
+    assert page_size_schema.get("minimum") == 1
+    assert page_size_schema.get("maximum") == 100
+
+    # compare_with 的 pattern 约束应保留
+    props = tools["vela_compare_application"].input_schema["properties"]
+    compare_with_schema = props["compare_with"]
+    assert compare_with_schema.get("pattern") == "^(running|latest)$"
+
+    # payload_type 的 pattern 约束应保留
+    payload_type_schema = tools["vela_create_trigger"].input_schema["properties"]["payload_type"]
+    assert payload_type_schema.get("pattern") == "^(custom|dockerhub|acr|harbor|jfrog)$"
 
 
 def test_handle_error_auth():

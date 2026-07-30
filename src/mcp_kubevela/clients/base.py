@@ -13,9 +13,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
-import httpx
+import httpx2 as httpx
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +44,14 @@ class VelaClientBase:
         self.username = os.getenv("VELA_USERNAME", "")
         self.password = os.getenv("VELA_PASSWORD", "")
         self.timeout = float(os.getenv("VELA_TIMEOUT", "30"))
+        self._verify = os.getenv("VELA_INSECURE", "false").lower() != "true"
+        if not self._verify:
+            logger.warning("TLS 证书验证已禁用（VELA_INSECURE=true），生产环境不建议使用")
 
         self._access_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
         self._auth_lock = asyncio.Lock()
-        self._http = httpx.AsyncClient(timeout=self.timeout)
+        self._http = httpx.AsyncClient(timeout=self.timeout, verify=self._verify)
 
     # ---- JWT 生命周期 ----
     async def _login(self) -> None:
@@ -114,7 +117,7 @@ class VelaClientBase:
         params: Optional[dict[str, Any]] = None,
         json_body: Optional[dict[str, Any]] = None,
         _retried: bool = False,
-    ) -> Any:
+    ) -> dict[str, Any]:
         """发起认证请求。path 形如 '/applications'（不含 /api/v1 前缀）。
 
         - 自动携带 Bearer accessToken；
@@ -145,7 +148,7 @@ class VelaClientBase:
         if not resp.content:
             return {}
         try:
-            return resp.json()
+            return cast(dict[str, Any], resp.json())
         except ValueError:
             return {"raw": resp.text}
 
