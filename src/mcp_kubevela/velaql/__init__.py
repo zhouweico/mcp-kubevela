@@ -8,12 +8,14 @@ Public API:
     VelaQLError, VelaQLParamError — typed exceptions
 """
 
+from mcp_kubevela.velaql.compiler import compile
 from mcp_kubevela.velaql.errors import VelaQLError, VelaQLParamError
 from mcp_kubevela.velaql.views import VelaQLView, VIEWS
 
 __all__ = [
     "VelaQLView",
     "VIEWS",
+    "compile",
     "VelaQLError",
     "VelaQLParamError",
 ]
