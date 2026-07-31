@@ -176,10 +176,11 @@ async def vela_velaql_query(
 
 ### D2: `cluster` 放在 tool 顶层而非 view schema 内
 
-- 当前实现: `cluster` 既是 tool 顶层参数 (预留), 也是部分 view 的 `params` 必填项
-- 短期: 实际仍从 `params` 取, 顶层 `cluster` 校验 = 忽略
-- 长期: 顶层 `cluster` 用于"同一查询跨多集群"等增强
+- 当前实现: `cluster` 既是 tool 顶层参数 (默认 None), 也是部分 view 的 `params` 必填项
+- 行为: 应用层 view 忽略顶层 `cluster`; 资源/运维层 view 的 cluster 来自 `params.cluster` (Pydantic 已在 params 内强制必填)
+- 顶层 `cluster` 留位是为了未来"同一查询跨多集群"等增强, 不破坏 schema
 - **用户拍板**: 上次会话确认顶层放, 不污染 view schema
+- **本次实施范围**: 顶层 `cluster` 仅作透传 placeholder, 实际查询以 `params.cluster` 为准
 
 ### D3: Pydantic `Literal` 不限制 `appNs` / `appName` 等自由字符串
 
