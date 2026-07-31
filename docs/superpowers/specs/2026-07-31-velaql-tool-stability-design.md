@@ -17,9 +17,9 @@ async def vela_velaql_query(velaql: Annotated[str, Field(...)]) -> str
 接受**单一自由字符串**, 对应的 VelaUX API `GET /api/v1/query?velaql=<raw>` 也是黑盒透传。
 这导致 LLM 在使用时频繁出错:
 
-1. **视图名拼错**: 6 个常用 view 中 (见 §3), LLM 经常臆造不存在名 (如 `pod-list-view`)
+1. **视图名拼错**: 7 个常用 view 中 (见 §3), LLM 经常臆造不存在名 (如 `pod-list-view`)
 2. **参数语义混淆**: `appNs` (KubeVela 项目命名空间) 与 `namespace` (K8s 真实命名空间) 拼写接近, 语义不同 — LLM 容易混用
-3. **必填/可选参数混淆**: `collect-logs` 有 6 必填 + 3 可选, LLM 经常漏掉 `container` 或 `tailLines`
+3. **必填/可选参数混淆**: `collect-logs` 有 4 必填 + 3 可选, LLM 经常漏掉 `container` 或 `tailLines`
 4. **错误不可恢复**: VelaUX 返回 4xx 时仅透传原文, LLM 无法判断是视图名错、参数错、还是权限问题
 5. **工具描述信息量低**: docstring 仅 4 行 + 2 个示例, 缺少结构化视图目录
 
@@ -35,12 +35,12 @@ async def vela_velaql_query(velaql: Annotated[str, Field(...)]) -> str
 
 **非目标**:
 - 不改 VelaUX 后端, 不改 `client.velaql_query()` 实现
-- 不引入新 view (本次只覆盖已观测到的 6 个)
+- 不引入新 view (本次只覆盖已观测到的 7 个)
 - 不改其他 27 个 MCP 工具
 
 ## 3. 视图清单 (本次覆盖)
 
-从生产环境真实抓取的 6 个 view 调用样本中提取, 分 3 个语义层:
+从生产环境真实抓取的 7 类 view 调用样本中提取, 分 3 个语义层:
 
 | # | view | 层 | 必填参数 | 可选参数 (默认) |
 |---|---|---|---|---|
@@ -50,8 +50,11 @@ async def vela_velaql_query(velaql: Annotated[str, Field(...)]) -> str
 | 4 | `component-pod-view` | 应用 | `appNs, appName` | — |
 | 5 | `pod-view` | 资源 | `cluster, namespace, name` | — |
 | 6 | `collect-logs` | 运维 | `cluster, namespace, pod, container` | `previous(false)`, `timestamps(true)`, `tailLines(3000)` |
+| 7 | `application-resource-detail-view` | 资源 | `cluster, namespace, name, kind, apiVersion` | — |
 
 `appNs` ≠ `namespace`: 前者是 KubeVela 项目命名空间 (VelaUX 项目列表中的 namespace), 后者是 K8s 真实命名空间。二者在多数场景下字符串相同, 但语义不同, 字段 description 必须显式区分。
+
+**`application-resource-detail-view` 备注**: `kind` 与 `apiVersion` 必须配对 (例: Pod↔v1, Deployment↔apps/v1, Application↔core.oam.dev/v1beta1, HelmRelease↔helm.toolkit.fluxcd.io/v2beta1, ReplicaSet↔apps/v1)。配对错误会由 VelaUX 端拒绝。本次**不在客户端强制配对** (合法组合过多, 维护成本高), 仅在字段 description 中提示。
 
 ## 4. 架构
 
@@ -61,7 +64,7 @@ async def vela_velaql_query(velaql: Annotated[str, Field(...)]) -> str
 src/mcp_kubevela/
   velaql/
     __init__.py            # 对外暴露 VIEWS, compile, VelaQLView
-    views.py               # VelaQLView 枚举 + 6 个 ParamSchema (Pydantic BaseModel) + ViewSpec 注册表
+    views.py               # VelaQLView 枚举 + 4 个 ParamSchema (BaseModel) + ViewSpec 注册表
     compiler.py            # 纯函数: (view, params: dict) -> velaql 字符串
     errors.py              # VelaQLError / VelaQLUnknownViewError / VelaQLParamError
   server.py                # 改造 vela_velaql_query tool, 调用 compiler
@@ -112,12 +115,13 @@ server.vela_velaql_query()
 
 ```python
 class VelaQLView(str, Enum):
-    SERVICE_ENDPOINTS_VIEW         = "service-endpoints-view"
-    APPLICATION_RESOURCE_TREE_VIEW = "application-resource-tree-view"
-    SERVICE_APPLIED_RESOURCES_VIEW = "service-applied-resources-view"
-    COMPONENT_POD_VIEW             = "component-pod-view"
-    POD_VIEW                       = "pod-view"
-    COLLECT_LOGS                   = "collect-logs"
+    SERVICE_ENDPOINTS_VIEW             = "service-endpoints-view"
+    APPLICATION_RESOURCE_TREE_VIEW     = "application-resource-tree-view"
+    SERVICE_APPLIED_RESOURCES_VIEW     = "service-applied-resources-view"
+    COMPONENT_POD_VIEW                 = "component-pod-view"
+    POD_VIEW                           = "pod-view"
+    APPLICATION_RESOURCE_DETAIL_VIEW   = "application-resource-detail-view"
+    COLLECT_LOGS                       = "collect-logs"
 
 # === 应用层 (4 个 view 共用同一 ParamSchema) ===
 class _AppLayerBase(BaseModel):
@@ -129,6 +133,19 @@ class PodViewParams(BaseModel):
     cluster:   str = Field(..., description="目标集群名 (vela_list_clusters 返回的 name)")
     namespace: str = Field(..., description="K8s 命名空间 — 注意: 这里是 K8s 真实命名空间, 不是 KubeVela appNs")
     name:      str = Field(..., description="Pod 名 (含 deployment 哈希后缀, 如 xdevops-ui-5ffb6c4b-wxb54)")
+
+class ResourceDetailViewParams(BaseModel):
+    """application-resource-detail-view{...}
+
+    查询某个 K8s 资源的详情, 通过 kind + apiVersion 唯一确定 GVR。
+    kind / apiVersion 必须配对 (Pod↔v1, Deployment↔apps/v1, Application↔core.oam.dev/v1beta1 等),
+    配对错误会由 VelaUX 端拒绝。
+    """
+    cluster:    str = Field(..., description="目标集群名")
+    namespace:  str = Field(..., description="K8s 命名空间")
+    name:       str = Field(..., description="资源名 (Pod/Deployment/etc. 的 metadata.name)")
+    kind:       str = Field(..., description="K8s 资源 Kind, 如 Pod / Deployment / ReplicaSet / Application / HelmRelease")
+    apiVersion: str = Field(..., description="K8s apiVersion, 如 v1 / apps/v1 / core.oam.dev/v1beta1 / helm.toolkit.fluxcd.io/v2beta1")
 
 # === 运维层 ===
 class CollectLogsParams(BaseModel):
@@ -152,6 +169,7 @@ async def vela_velaql_query(
             "视图参数 (JSON 对象)。键名见 view 描述: "
             "应用层 view -> {appNs, appName}; "
             "pod-view -> {cluster, namespace, name}; "
+            "application-resource-detail-view -> {cluster, namespace, name, kind, apiVersion}; "
             "collect-logs -> {cluster, namespace, pod, container, [previous, timestamps, tailLines]}"
         )
     )],
@@ -220,12 +238,12 @@ async def vela_velaql_query(
 
 ## 10. 实施顺序
 
-1. 新建 `velaql/views.py` — Enum + 6 个 ParamSchema + VIEWS 注册表
+1. 新建 `velaql/views.py` — Enum + 4 个 ParamSchema (覆盖 7 个 view) + VIEWS 注册表
 2. 新建 `velaql/compiler.py` — 纯函数 + 单测
 3. 新建 `velaql/errors.py` — typed exceptions
 4. 改 `server.py:801-822` 的 tool 定义, 调用 compiler
 5. 改 `tests/test_server.py` 中相关测试
-6. 更新 README 中"故障排查"一节对 `vela_velaql_query` 的描述 (给 6 个 view 的示例)
+6. 更新 README 中"故障排查"一节对 `vela_velaql_query` 的描述 (给 7 个 view 的示例)
 
 ## 11. 风险
 
@@ -248,7 +266,7 @@ async def vela_velaql_query(
 ---
 
 **审核点**:
-1. §3 视图清单 (6 个) 是否完整
+1. §3 视图清单 (7 个) 是否完整
 2. §6 Pydantic schema 是否需要补 `description` 字段
 3. §10 实施顺序是否合理
 4. §1 问题陈述是否覆盖你实际遇到的痛点
