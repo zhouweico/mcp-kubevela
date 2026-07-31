@@ -5,6 +5,7 @@ import pytest
 
 from mcp_kubevela import server
 from mcp_kubevela.clients.base import VelaApiError, VelaAuthError
+from mcp_kubevela.velaql import VelaQLView
 
 EXPECTED_READONLY = {
     "vela_list_applications",
@@ -65,7 +66,10 @@ async def test_flat_annotated_params():
     tools = await server.mcp.list_tools()
     for tool in tools:
         props = set(tool.input_schema.get("properties", {}).keys())
-        assert "params" not in props, f"{tool.name} 仍使用 params 包装对象"
+        # vela_velaql_query 的 params 是一个真正的扁平参数（dict[str, Any]），
+        # 不是包装对象，因此允许它包含 params 属性名。
+        if tool.name != "vela_velaql_query":
+            assert "params" not in props, f"{tool.name} 仍使用 params 包装对象"
         assert "ctx" not in props, f"{tool.name} 暴露了 ctx 参数"
 
 
@@ -77,6 +81,8 @@ async def test_flat_params_required_fields():
     assert set(tools["vela_get_workflow_logs"].input_schema["required"]) == {
         "app_name", "workflow_name", "record", "step"
     }
+    # vela_velaql_query 的必填参数为 view 与 params（cluster / response_format 有默认值）
+    assert set(tools["vela_velaql_query"].input_schema["required"]) == {"view", "params"}
     # 无必填（全部带默认值）的工具
     assert tools["vela_list_applications"].input_schema.get("required", []) == []
     assert tools["vela_system_info"].input_schema.get("required", []) == []
@@ -142,3 +148,127 @@ def test_normalize_transport(raw, expected):
 def test_normalize_transport_invalid():
     with pytest.raises(ValueError):
         server._normalize_transport("grpc")
+
+
+"""vela_velaql_query tool — end-to-end tool tests"""
+
+
+async def test_velaql_query_tool_registered():
+    tools = {t.name for t in await server.mcp.list_tools()}
+    assert "vela_velaql_query" in tools
+
+
+def test_velaql_query_input_schema_requires_view_and_params():
+    import asyncio
+    tools = asyncio.run(server.mcp.list_tools())
+    tool = next(t for t in tools if t.name == "vela_velaql_query")
+    schema = tool.input_schema
+    assert set(schema["required"]) == {"view", "params"}
+    # view is an enum — FastMCP renders it as a $ref into $defs
+    view_ref = schema["properties"]["view"]
+    view_schema = schema["$defs"][view_ref["$ref"].split("/")[-1]]
+    assert "enum" in view_schema
+    assert len(view_schema["enum"]) == 9
+    assert "component-pod-view" in view_schema["enum"]
+    assert "collect-logs" in view_schema["enum"]
+    assert "application-resource-detail-view" in view_schema["enum"]
+    # params is a free-form object
+    assert schema["properties"]["params"]["type"] == "object"
+
+
+"""vela_velaql_query end-to-end — exercise full tool body via in-memory mocks.
+
+NOTE: calling the tool function directly (not through the MCP protocol) skips
+FastMCP's enum coercion, so valid views are passed as VelaQLView members.
+"""
+
+
+class _FakeClient:
+    """Stand-in for the VelaUX client used by the tool's happy path."""
+
+    def __init__(self, response: dict) -> None:
+        self._response = response
+        self.calls: list[str] = []
+
+    async def velaql_query(self, velaql: str) -> dict:
+        self.calls.append(velaql)
+        return self._response
+
+
+@pytest.fixture
+def fake_client(monkeypatch):
+    """Patches get_vela_client to return a _FakeClient controllable per test."""
+    holder: dict = {}
+
+    async def _stub_get():
+        return holder["client"]
+
+    monkeypatch.setattr(server, "get_vela_client", _stub_get)
+
+    def _make(response: dict) -> _FakeClient:
+        holder["client"] = _FakeClient(response)
+        return holder["client"]
+
+    return _make
+
+
+async def test_velaql_query_happy_path_component_pod(fake_client):
+    client = fake_client({"status": {"pods": [{"name": "demo-abc-xyz"}]}})
+    result = await server.vela_velaql_query(
+        view=VelaQLView.COMPONENT_POD_VIEW,
+        params={"appNs": "devops-admin-test", "appName": "xdevops-ui"},
+    )
+    # Compiler produced the right wire string and we passed it through.
+    assert client.calls == [
+        "component-pod-view{appNs=devops-admin-test,appName=xdevops-ui}.status"
+    ]
+    # Output mentions the view name and renders the data.
+    assert "VelaQL 查询结果" in result
+    assert "demo-abc-xyz" in result
+
+
+async def test_velaql_query_missing_required_param(fake_client):
+    client = fake_client({})  # would be called if validation passed — must NOT happen
+    result = await server.vela_velaql_query(
+        view=VelaQLView.COMPONENT_POD_VIEW,
+        params={"appNs": "x"},  # missing appName
+    )
+    # Server-side validation rejected the call; we never hit VelaUX.
+    assert client.calls == []
+    # Output names the missing field so the LLM can self-correct.
+    assert "缺失必填参数" in result
+    assert "appName" in result
+
+
+async def test_velaql_query_unknown_view_returns_enum_error(fake_client):
+    client = fake_client({})
+    # FastMCP validates the enum before the body runs, so we expect
+    # a ValidationError to propagate. We just assert it doesn't reach
+    # the client.
+    with pytest.raises(Exception):
+        await server.vela_velaql_query(
+            view="totally-bogus-view",  # type: ignore[arg-type]
+            params={"appNs": "x", "appName": "y"},
+        )
+    assert client.calls == []
+
+
+async def test_velaql_query_collect_logs_with_optional_defaults(fake_client):
+    client = fake_client({"status": {"logs": "line1\nline2"}})
+    await server.vela_velaql_query(
+        view=VelaQLView.COLLECT_LOGS,
+        params={
+            "cluster": "devops-test",
+            "namespace": "devops-admin",
+            "pod": "xdevops-ui-5ffb6c4b-wxb54",
+            "container": "xdevops-ui",
+        },
+    )
+    # Optional params (previous/timestamps/tailLines) MUST be absent from wire string.
+    # collect-logs has NO suffix — the legacy `.logs` suffix returns HTTP 502 on
+    # real VelaUX, so the wire string must end with `}`.
+    wire = client.calls[0]
+    assert "previous" not in wire
+    assert "timestamps" not in wire
+    assert "tailLines" not in wire
+    assert wire.endswith("}")

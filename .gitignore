@@ -37,6 +37,8 @@ Thumbs.db
 
 # ===== 项目级 memory / 本地工作目录（不进仓库）=====
 .workbuddy/
+.omo/
+.superpowers/
 docs/
 
 # ===== 临时文件 =====

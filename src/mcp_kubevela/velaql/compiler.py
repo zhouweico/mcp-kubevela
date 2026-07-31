@@ -12,7 +12,7 @@ into the wire-format string. It:
     are absent from the output (per spec §11).
   * Emits key=value pairs in Pydantic field declaration order
     (model_fields iteration).
-  * Appends the canonical suffix (.status / .logs).
+  * Appends the canonical suffix (.status for most views; collect-logs has none).
 """
 
 from typing import Any
@@ -22,11 +22,13 @@ from pydantic import ValidationError
 from mcp_kubevela.velaql.errors import VelaQLParamError
 from mcp_kubevela.velaql.views import VIEWS, VelaQLView
 
-
-# Canonical suffix per view. Hardcoded because VelaUX only accepts these
-# two for the views we support.
+# Canonical suffix per view. Verified against a live VelaUX (vela.lbxdrugs.com):
+#   * Most views render with a `.status` suffix (or no suffix at all — both work).
+#   * `collect-logs` MUST have NO suffix: the legacy `.logs` suffix returns
+#     HTTP 502 Bad Gateway from the upstream, so we emit the bare form that
+#     matches the real, working query URLs.
 _SUFFIX: dict[VelaQLView, str] = {
-    VelaQLView.COLLECT_LOGS: ".logs",
+    VelaQLView.COLLECT_LOGS: "",
 }
 
 
@@ -52,7 +54,7 @@ def compile(view: VelaQLView, params: dict[str, Any]) -> str:
         bad: dict[str, str] = {}
         for err in exc.errors():
             loc = err.get("loc", ())
-            name = loc[0] if loc else "<root>"
+            name = str(loc[0]) if loc else "<root>"
             if err.get("type") == "missing":
                 if name not in missing:
                     missing.append(name)

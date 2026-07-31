@@ -129,7 +129,7 @@ docker run -d -p 8080:8080 \
 | `vela_list_clusters` | 平台 | 集群列表 / 集群详情 | `GET /clusters[/{c}]` |
 | `vela_list_addons` | 平台 | 插件市场 / 已启用插件 / 详情+状态 | `GET /addons[...]` |
 | `vela_list_definitions` | 平台 | X-Definition 列表 / 参数 schema | `GET /definitions[...]` |
-| `vela_velaql_query` | 平台 | VelaQL 查询（Pod / 日志 / 资源拓扑） | `GET /query` |
+| `vela_velaql_query` | 平台 | VelaQL 查询（Pod / 日志 / 资源拓扑），schema-typed `(view, params)` 接口覆盖 9 个已知 view | `GET /query` |
 | `vela_system_info` | 平台 | 平台系统信息（版本 / 登录方式 / 集群与应用统计 / 已启用插件） | `GET /system_info` |
 
 ### 写工具（7 个）
@@ -403,7 +403,7 @@ demo 最近一次部署的工作流执行到哪一步了？把失败步骤的日
 ```
 用 VelaQL 查一下 demo 在 prod 环境的 Pod 列表，有没有在重启的
 ```
-（`vela_velaql_query`）
+（`vela_velaql_query`，`view=component-pod-view`，`params={appNs, appName}`）
 
 ```
 demo 应用线上行为和配置对不上，帮我对比一下集群运行态和最新配置有没有漂移

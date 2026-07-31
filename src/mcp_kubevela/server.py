@@ -28,6 +28,13 @@ from mcp.server.mcpserver.context import Context
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from mcp_kubevela.velaql import (
+    VIEWS,
+    VelaQLParamError,
+    VelaQLView,
+    compile,
+)
+
 from .auth import TokenAuthMiddleware
 from .clients import VelaApiError, VelaAuthError, get_vela_client, reset_vela_client
 from .render import fmt_status, render_kv, render_list, to_json
@@ -800,26 +807,63 @@ async def vela_list_definitions(
 
 @mcp.tool(name="vela_velaql_query", annotations=_ro("VelaQL 查询"))
 async def vela_velaql_query(
-    velaql: Annotated[str, Field(
+    view: Annotated[VelaQLView, Field(description="视图。必须是受支持 view 之一。")],
+    params: Annotated[dict[str, Any], Field(
         description=(
-            "VelaQL 查询语句，如 "
-            'component-pod-view{appNs=default,appName=demo}.status 或 '
-            'collect-logs{cluster=local,namespace=default,pod=xxx}.logs'
-        ),
-        min_length=1,
+            "视图参数 (JSON 对象)。键名见 view 描述: "
+            "service-endpoints-view / application-resource-tree-view / service-applied-resources-view / "
+            "component-pod-view -> {appNs, appName}; "
+            "component-service-view -> {appNs, appName, [name, cluster, clusterNs]}; "
+            "service-view -> {appNs, appName, [cluster, clusterNs]}; "
+            "pod-view -> {cluster, namespace, name}; "
+            "application-resource-detail-view -> {cluster, namespace, name, kind, apiVersion}; "
+            "collect-logs -> {cluster, namespace, pod, container, [previous, timestamps, tailLines]}"
+        )
     )],
+    cluster: Annotated[str | None, Field(
+        description=("多集群覆盖; 应用层 view 忽略此参数 (应用通过 target 决定集群), "
+                     "pod-view / collect-logs 此参数为必填 (在 params 之外, 此处供未来 cluster 路由优化)"),
+        default=None,
+    )] = None,
+    response_format: Annotated[ResponseFormat, Field(default=ResponseFormat.MARKDOWN)] = ResponseFormat.MARKDOWN,
 ) -> str:
     """执行 VelaQL 查询（Pod 列表、容器日志、资源拓扑等运行时数据）。
 
     对应 API：GET /api/v1/query?velaql=
-    常用视图：component-pod-view、component-service-view、collect-logs、service-view
+    使用 view 枚举 + 结构化 params (见各 view 的 ParamSchema 描述),
+    由服务器拼装 velaql 字符串。错误以结构化文本返回, LLM 可直接 parse 修复后重试。
     """
+    # 1) 编译 (Pydantic 校验 + 拼装)
+    try:
+        velaql_str = compile(view, params)
+    except VelaQLParamError as e:
+        # 已知参数错误: 返回结构化文本, 不抛栈
+        spec = VIEWS[view]
+        lines = [f"VelaQL 参数错误: {e}", ""]
+        if e.missing:
+            lines.append("**缺失必填参数**:")
+            for name in e.missing:
+                lines.append(f"- `{name}`")
+            lines.append("")
+        if e.bad:
+            lines.append("**非法参数值**:")
+            for name, reason in e.bad.items():
+                lines.append(f"- `{name}`: {reason}")
+            lines.append("")
+        lines.append(f"参考示例: `{spec.example}`")
+        return "\n".join(lines)
+
+    # 2) 调 VelaUX
     try:
         client = await get_vela_client()
-        data = await client.velaql_query(velaql)
-        return f"# VelaQL 查询结果\n\n```json\n{to_json(data)}\n```"
+        data = await client.velaql_query(velaql_str)
     except Exception as e:
         return handle_error(e)
+
+    # 3) 渲染
+    if response_format == ResponseFormat.JSON:
+        return to_json(data)
+    return f"# VelaQL 查询结果\n\n```json\n{to_json(data)}\n```"
 
 
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 (2026-07-31)
+
+### 破坏性变更
+
+- **`vela_velaql_query` 输入参数重构**：旧的自由字符串 `velaql: str` 改为 schema-typed `(view, params)`
+  - `view` 现在是 9 选 1 的枚举（component-pod-view / collect-logs / service-view / 等）
+  - `params` 是结构化 JSON 字典，由对应 view 的 Pydantic schema 校验
+  - 已知 view 的参数错误以可解析的 markdown 文本返回，LLM 可直接重试
+
 ## 0.3.0 (2026-07-30)
 
 ### 新增

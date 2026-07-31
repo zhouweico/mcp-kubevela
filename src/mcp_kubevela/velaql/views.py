@@ -11,7 +11,6 @@ velaql-tool-stability-design.md §3.
 """
 
 from enum import Enum
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 

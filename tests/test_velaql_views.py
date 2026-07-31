@@ -1,16 +1,16 @@
 """velaql/views.py — Enum + ParamSchemas + VIEWS registry tests"""
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
 from mcp_kubevela.velaql.views import (
-    VelaQLView,
+    VIEWS,
+    CollectLogsParams,
     ComponentServiceViewParams,
-    ServiceViewParams,
     PodViewParams,
     ResourceDetailViewParams,
-    CollectLogsParams,
-    VIEWS,
+    ServiceViewParams,
+    VelaQLView,
 )
 
 

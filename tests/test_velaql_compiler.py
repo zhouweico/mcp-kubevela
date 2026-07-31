@@ -1,7 +1,6 @@
 """velaql/compiler.py — pure (view, params) -> velaql string tests"""
 
 import pytest
-from pydantic import ValidationError
 
 from mcp_kubevela.velaql.compiler import compile
 from mcp_kubevela.velaql.errors import VelaQLParamError
@@ -27,9 +26,11 @@ def test_compile_collect_logs_with_defaults_omitted():
         },
     )
     # Optional fields (previous/timestamps/tailLines) must NOT appear when not provided.
+    # collect-logs has NO suffix — the legacy `.logs` suffix returns HTTP 502 on
+    # real VelaUX (verified against vela.lbxdrugs.com), so we emit the bare form.
     assert out == (
         "collect-logs{cluster=devops-test,namespace=devops-admin,"
-        "pod=xdevops-ui-5ffb6c4b-wxb54,container=xdevops-ui}.logs"
+        "pod=xdevops-ui-5ffb6c4b-wxb54,container=xdevops-ui}"
     )
 
 
@@ -47,9 +48,10 @@ def test_compile_collect_logs_with_explicit_optional():
         },
     )
     # Order matches Pydantic field declaration order in CollectLogsParams.
+    # No `.logs` suffix (see test_compile_collect_logs_with_defaults_omitted).
     assert out == (
         "collect-logs{cluster=c,namespace=n,pod=p,container=ctr,"
-        "previous=true,timestamps=false,tailLines=500}.logs"
+        "previous=true,timestamps=false,tailLines=500}"
     )
 
 
