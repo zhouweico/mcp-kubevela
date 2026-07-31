@@ -37,6 +37,7 @@ Thumbs.db
 
 # ===== 项目级 memory / 本地工作目录（不进仓库）=====
 .workbuddy/
+docs/
 
 # ===== 临时文件 =====
 *.log
