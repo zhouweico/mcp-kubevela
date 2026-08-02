@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import Annotated, Any, Optional
@@ -24,6 +24,7 @@ from typing import Annotated, Any, Optional
 import httpx2 as httpx
 from mcp.server import MCPServer
 from mcp.server.elicitation import AcceptedElicitation
+from mcp.server.mcpserver import Elicit, ElicitationResult, Resolve
 from mcp.server.mcpserver.context import Context
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -75,28 +76,19 @@ class ResponseFormat(str, Enum):
 
 
 class _ConfirmSchema(BaseModel):
-    """MRTR 确认表单 schema"""
+    """写操作确认表单：勾选后方可执行"""
+
     confirm: bool = Field(..., description="确认执行此操作")
 
 
-async def _confirm_action(ctx: Optional[Context], action_desc: str) -> tuple[bool, str]:
-    """通过 MRTR 确认破坏性操作。
+def _is_confirmed(result: ElicitationResult[_ConfirmSchema]) -> bool:
+    """判断用户是否确认执行（accept 且 confirm=True）"""
+    return isinstance(result, AcceptedElicitation) and result.data.confirm
 
-    ctx 不可用时降级为直接执行。
-    """
-    if not ctx:
-        return True, ""
-    try:
-        result = await ctx.elicit(
-            f"⚠️ 确认{action_desc}？此操作不可逆。",
-            _ConfirmSchema,
-        )
-        if isinstance(result, AcceptedElicitation) and result.data.confirm:
-            return True, ""
-        return False, "已取消操作"
-    except Exception:
-        logger.exception("确认流程异常：%s", action_desc)
-        return False, "确认流程异常，已中止操作"
+
+def _cancelled() -> str:
+    """用户取消时的统一返回"""
+    return "已取消操作"
 
 
 # ==================== 错误处理 ====================
@@ -123,6 +115,13 @@ def handle_error(e: Exception) -> str:
             )
         if e.status_code == 404:
             return f"错误：资源不存在，请检查应用名/环境名/资源名是否正确。详情：{e.message}"
+        if e.status_code == 400 and e.business_code == 10004:
+            return (
+                "错误：部署冲突——上一次部署尚未收尾"
+                "（状态非 complete/terminated/failure）。"
+                "请先用 vela_list_workflow_records 查看前次执行状态，"
+                "确认可以覆盖后再以 force=true 重试（需人工确认）。"
+            )
         return (
             f"错误：VelaUX 请求失败（HTTP {e.status_code}，"
             f"业务码 {e.business_code}）：{e.message}"
@@ -1274,9 +1273,32 @@ if not _read_only:
         except Exception as e:
             return handle_error(e)
 
+    def _make_deploy_resolver() -> Callable[..., Awaitable[Elicit[_ConfirmSchema]]]:
+        """部署确认 resolver：展示应用名与工作流，force 时额外警示"""
+
+        async def resolver(
+            ctx: Context, app_name: str, workflow_name: Optional[str], force: bool
+        ) -> Elicit[_ConfirmSchema]:
+            wf = workflow_name or "默认工作流"
+            if force:
+                msg = (
+                    f"⚠️ 确认强制部署应用 {app_name}（{wf}）？\n"
+                    f"force=true 将忽略上一次部署是否完成的检查，"
+                    f"若前次部署仍在进行，新版本会直接叠加下发。"
+                )
+            else:
+                msg = f"⚠️ 确认部署应用 {app_name}（{wf}）？"
+            return Elicit(msg, _ConfirmSchema)
+
+        return resolver
+
     @mcp.tool(name="vela_deploy_application", annotations=_rw("部署应用"))
     async def vela_deploy_application(
         app_name: Annotated[str, Field(description="应用名称", min_length=1)],
+        confirm: Annotated[
+            ElicitationResult[_ConfirmSchema],
+            Resolve(_make_deploy_resolver()),
+        ],
         workflow_name: Annotated[
             Optional[str],
             Field(
@@ -1285,13 +1307,25 @@ if not _read_only:
             ),
         ] = None,
         note: Annotated[Optional[str], Field(default=None, description="部署说明")] = None,
-        force: Annotated[bool, Field(default=False, description="是否强制部署（存在执行中的工作流时覆盖）")] = False,
+        force: Annotated[
+            bool,
+            Field(
+                default=False,
+                description=(
+                    "强制部署：忽略未完成的部署事件（VelaUX 语义 ignore unfinished events）。"
+                    "上一次部署状态非 complete/terminated/failure 时（含 running 与卡死的 init），"
+                    "常规部署会返回部署冲突，此时可置 true"
+                ),
+            ),
+        ] = False,
         ctx: Optional[Context] = None,
     ) -> str:
         """触发应用部署工作流（异步）。返回执行记录名，可用 vela_list_workflow_records 跟踪进度。
 
         对应 API：POST /api/v1/applications/{app}/deploy
         """
+        if not _is_confirmed(confirm):
+            return _cancelled()
         try:
             if ctx:
                 await ctx.report_progress(0, 0, f"正在触发应用 {app_name} 部署...")
@@ -1356,6 +1390,19 @@ if not _read_only:
         except Exception as e:
             return handle_error(e)
 
+    def _make_rollback_resolver() -> Callable[..., Awaitable[Elicit[_ConfirmSchema]]]:
+        """回滚确认 resolver：展示应用名与目标版本"""
+
+        async def resolver(
+            ctx: Context, app_name: str, revision: str
+        ) -> Elicit[_ConfirmSchema]:
+            return Elicit(
+                f"⚠️ 确认回滚应用 {app_name} 到版本 {revision}？此操作不可逆。",
+                _ConfirmSchema,
+            )
+
+        return resolver
+
     @mcp.tool(
         name="vela_rollback_application",
         annotations=_rw("回滚应用版本", destructive=True),
@@ -1363,16 +1410,18 @@ if not _read_only:
     async def vela_rollback_application(
         app_name: Annotated[str, Field(description="应用名称", min_length=1)],
         revision: Annotated[str, Field(description="目标版本号（来自版本历史）", min_length=1)],
+        confirm: Annotated[
+            ElicitationResult[_ConfirmSchema],
+            Resolve(_make_rollback_resolver()),
+        ],
         ctx: Optional[Context] = None,
     ) -> str:
-        """回滚应用到指定历史版本（危险操作，MRTR 确认）。
+        """回滚应用到指定历史版本（危险操作，需人工确认）。
 
         对应 API：POST /api/v1/applications/{app}/revisions/{revision}/rollback
         """
-        if ctx:
-            proceed, msg = await _confirm_action(ctx, f"回滚应用 {app_name} 到版本 {revision}")
-            if not proceed:
-                return msg
+        if not _is_confirmed(confirm):
+            return _cancelled()
         try:
             if ctx:
                 await ctx.report_progress(0, 0, f"正在回滚应用 {app_name} 到版本 {revision}...")
@@ -1387,11 +1436,30 @@ if not _read_only:
         except Exception as e:
             return handle_error(e)
 
+    def _make_resume_resolver() -> Callable[..., Awaitable[Elicit[_ConfirmSchema]]]:
+        """恢复工作流确认 resolver：展示应用、工作流与记录"""
+
+        async def resolver(
+            ctx: Context, app_name: str, workflow_name: str, record: str, step: Optional[str]
+        ) -> Elicit[_ConfirmSchema]:
+            step_info = f"，步骤 {step}" if step else ""
+            return Elicit(
+                f"⚠️ 确认恢复工作流 {app_name}/{workflow_name}（记录 {record}{step_info}）？"
+                f"此操作将继续执行后续发布步骤。",
+                _ConfirmSchema,
+            )
+
+        return resolver
+
     @mcp.tool(name="vela_resume_workflow", annotations=_rw("恢复挂起的工作流"))
     async def vela_resume_workflow(
         app_name: Annotated[str, Field(description="应用名称", min_length=1)],
         workflow_name: Annotated[str, Field(description="工作流名", min_length=1)],
         record: Annotated[str, Field(description="工作流执行记录名", min_length=1)],
+        confirm: Annotated[
+            ElicitationResult[_ConfirmSchema],
+            Resolve(_make_resume_resolver()),
+        ],
         step: Annotated[Optional[str], Field(default=None, description="步骤名（仅恢复指定步骤时填写）")] = None,
         ctx: Optional[Context] = None,
     ) -> str:
@@ -1399,6 +1467,8 @@ if not _read_only:
 
         对应 API：GET .../records/{record}/resume
         """
+        if not _is_confirmed(confirm):
+            return _cancelled()
         try:
             if ctx:
                 await ctx.report_progress(0, 0, f"正在恢复工作流 {app_name}/{workflow_name}...")
@@ -1413,6 +1483,20 @@ if not _read_only:
         except Exception as e:
             return handle_error(e)
 
+    def _make_terminate_resolver() -> Callable[..., Awaitable[Elicit[_ConfirmSchema]]]:
+        """终止工作流确认 resolver：展示应用、工作流与记录"""
+
+        async def resolver(
+            ctx: Context, app_name: str, workflow_name: str, record: str
+        ) -> Elicit[_ConfirmSchema]:
+            return Elicit(
+                f"⚠️ 确认终止工作流 {app_name}/{workflow_name}（记录 {record}）？"
+                f"中断后可能残留半部署状态。",
+                _ConfirmSchema,
+            )
+
+        return resolver
+
     @mcp.tool(
         name="vela_terminate_workflow",
         annotations=_rw("终止执行中的工作流", destructive=True),
@@ -1421,16 +1505,18 @@ if not _read_only:
         app_name: Annotated[str, Field(description="应用名称", min_length=1)],
         workflow_name: Annotated[str, Field(description="工作流名", min_length=1)],
         record: Annotated[str, Field(description="工作流执行记录名", min_length=1)],
+        confirm: Annotated[
+            ElicitationResult[_ConfirmSchema],
+            Resolve(_make_terminate_resolver()),
+        ],
         ctx: Optional[Context] = None,
     ) -> str:
-        """终止执行中的工作流（危险操作，MRTR 确认）。
+        """终止执行中的工作流（危险操作，需人工确认）。
 
         对应 API：GET .../records/{record}/terminate
         """
-        if ctx:
-            proceed, msg = await _confirm_action(ctx, f"终止工作流 {app_name}/{workflow_name}/{record}")
-            if not proceed:
-                return msg
+        if not _is_confirmed(confirm):
+            return _cancelled()
         try:
             if ctx:
                 await ctx.report_progress(0, 0, f"正在终止工作流 {app_name}/{workflow_name}...")
@@ -1442,11 +1528,34 @@ if not _read_only:
         except Exception as e:
             return handle_error(e)
 
+    def _make_create_trigger_resolver() -> Callable[..., Awaitable[Elicit[_ConfirmSchema]]]:
+        """创建触发器确认 resolver：展示应用、触发器名、工作流与载荷类型"""
+
+        async def resolver(
+            ctx: Context,
+            app_name: str,
+            name: str,
+            workflow_name: str,
+            payload_type: str,
+        ) -> Elicit[_ConfirmSchema]:
+            return Elicit(
+                f"⚠️ 确认为应用 {app_name} 创建触发器 {name}"
+                f"（工作流 {workflow_name}，类型 {payload_type}）？"
+                f"将生成长期有效的 webhook token。",
+                _ConfirmSchema,
+            )
+
+        return resolver
+
     @mcp.tool(name="vela_create_trigger", annotations=_rw("创建应用触发器"))
     async def vela_create_trigger(
         app_name: Annotated[str, Field(description="应用名称", min_length=1)],
         name: Annotated[str, Field(description="触发器名称", min_length=1)],
         workflow_name: Annotated[str, Field(description="触发的工作流名", min_length=1)],
+        confirm: Annotated[
+            ElicitationResult[_ConfirmSchema],
+            Resolve(_make_create_trigger_resolver()),
+        ],
         payload_type: Annotated[
             str,
             Field(
@@ -1467,6 +1576,8 @@ if not _read_only:
 
         对应 API：POST /api/v1/applications/{app}/triggers
         """
+        if not _is_confirmed(confirm):
+            return _cancelled()
         try:
             if ctx:
                 await ctx.report_progress(0, 0, f"正在创建触发器 {name}...")

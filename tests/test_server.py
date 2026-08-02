@@ -1,9 +1,15 @@
 """server 基础测试：工具注册、只读模式、错误处理"""
 
 import importlib
+from types import SimpleNamespace
 
 import httpx2 as httpx
 import pytest
+from mcp.server.elicitation import (
+    AcceptedElicitation,
+    CancelledElicitation,
+    DeclinedElicitation,
+)
 
 from mcp_kubevela import server
 from mcp_kubevela.clients.base import VelaApiError, VelaAuthError
@@ -297,3 +303,101 @@ async def test_velaql_query_collect_logs_with_optional_defaults(fake_client):
     assert "timestamps" not in wire
     assert "tailLines" not in wire
     assert wire.endswith("}")
+
+
+"""写前确认机制测试 — Resolve + Elicit 路径验证"""
+
+
+def _make_accepted(confirm: bool) -> AcceptedElicitation:
+    """构造一个已接受的确认结果"""
+    return AcceptedElicitation.model_construct(data=SimpleNamespace(confirm=confirm))
+
+
+def _make_declined() -> DeclinedElicitation:
+    """构造一个被拒绝的确认结果"""
+    return DeclinedElicitation.model_construct()
+
+
+def _make_cancelled() -> CancelledElicitation:
+    """构造一个被取消的确认结果"""
+    return CancelledElicitation.model_construct()
+
+
+def test_is_confirmed_accepted_true():
+    """accept + confirm=True → True"""
+    assert server._is_confirmed(_make_accepted(True)) is True
+
+
+def test_is_confirmed_accepted_false():
+    """accept + confirm=False → False（用户勾选了但没勾 confirm）"""
+    assert server._is_confirmed(_make_accepted(False)) is False
+
+
+def test_is_confirmed_declined():
+    """decline → False"""
+    assert server._is_confirmed(_make_declined()) is False
+
+
+def test_is_confirmed_cancelled():
+    """cancel → False"""
+    assert server._is_confirmed(_make_cancelled()) is False
+
+
+def test_cancelled_message():
+    assert server._cancelled() == "已取消操作"
+
+
+async def test_confirm_param_invisible(write_mode):
+    """5 个写工具的 confirm 参数必须对 AI 不可见（SDK 从 inputSchema 剔除）"""
+    write_tools = {
+        "vela_deploy_application",
+        "vela_rollback_application",
+        "vela_resume_workflow",
+        "vela_terminate_workflow",
+        "vela_create_trigger",
+    }
+    tools = await write_mode.mcp.list_tools()
+    for tool in tools:
+        if tool.name in write_tools:
+            props = set(tool.input_schema.get("properties", {}).keys())
+            assert "confirm" not in props, f"{tool.name} 暴露了 confirm 参数"
+
+
+async def test_rollback_declined_returns_cancelled(write_mode):
+    """rollback 在用户拒绝时返回"已取消操作"，不调用 VelaUX"""
+    called: list[str] = []
+
+    async def _stub_get():
+        called.append("get_client")
+        raise AssertionError("不应在取消时调用 VelaUX")
+
+    write_mode.get_vela_client = _stub_get  # type: ignore[attr-defined]
+    result = await write_mode.vela_rollback_application(
+        app_name="demo",
+        revision="v1",
+        confirm=_make_declined(),
+    )
+    assert result == "已取消操作"
+    assert called == []
+
+
+async def test_rollback_accepted_proceeds(write_mode):
+    """rollback 在用户确认后调用 VelaUX"""
+    async def _stub_get():
+        raise VelaApiError(404, 0, "not found")  # 确认通过 → 到了 client 调用
+
+    write_mode.get_vela_client = _stub_get  # type: ignore[attr-defined]
+    result = await write_mode.vela_rollback_application(
+        app_name="demo",
+        revision="v1",
+        confirm=_make_accepted(True),
+    )
+    assert "资源不存在" in result  # 确认通过，走到了 handle_error
+
+
+def test_handle_error_deploy_conflict():
+    """业务码 10004（部署冲突）应返回可操作提示"""
+    msg = server.handle_error(VelaApiError(400, 10004, "application deploy conflict"))
+    assert "部署冲突" in msg
+    assert "force=true" in msg
+    assert "vela_list_workflow_records" in msg

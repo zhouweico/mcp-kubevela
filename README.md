@@ -11,8 +11,8 @@ KubeVela MCP Server - 让 AI 助手能够查询和管理 [KubeVela](https://kube
 - **JWT 自动管理**：用户名/密码登录换取 accessToken，`401` 时自动 refresh / 重登录并重放请求，无需手工维护 Token
 - **KubeVela 原生概念**：直接以 `project / application / env / target / workflow / addon` 组织交付，读写一体
 - **默认只读**：写工具默认不注册，需显式 `VELA_READ_ONLY=false` 开启，避免未经配置即直连生产环境
-- **危险操作防护**：回滚/终止工作流等高危操作带 `destructiveHint` 注解并通过 MRTR 确认；删除应用、回收环境、禁用插件等高危能力**未提供工具**，从根源上杜绝误操作
-- **破坏性操作 MRTR 确认**：回滚应用、终止工作流等高危操作通过 MCP 2.0 Elicitation 机制弹出确认表单，需用户明确同意后才执行；若客户端不支持 Elicitation（如 stdio 模式），则降级为直接执行
+- **危险操作防护**：回滚/终止工作流等高危操作带 `destructiveHint` 注解并通过 MCP 2.0 Elicitation 确认；删除应用、回收环境、禁用插件等高危能力**未提供工具**，从根源上杜绝误操作
+- **写前确认**：部署、回滚、恢复/终止工作流、创建触发器等写操作通过 MCP 2.0 `Resolve` + `Elicit` 机制弹出确认表单，需用户明确同意后才执行；客户端不支持 Elicitation 时由 SDK 拒绝调用（fail-closed）
 - **MCP Resources**：以 `vela://` URI 暴露系统信息、项目列表、环境列表、集群列表等只读元数据，客户端可直接读取
 - **Stateless HTTP**：支持无状态 HTTP 模式，每次请求独立处理、无会话状态，适合 Serverless / 多副本部署
 - **灵活部署**：`uvx` 免安装运行、Docker 构建即用
@@ -144,10 +144,10 @@ docker run -d -p 8080:8080 \
 |------|------|------|----------|
 | `vela_create_application` | 应用 | 创建应用（含首个组件） | `POST /applications` |
 | `vela_dry_run_application` | 应用 | 部署预演（只渲染不落地） | `POST .../dry-run` |
-| `vela_deploy_application` | 应用 | 触发部署（异步，返回部署记录） | `POST .../deploy` |
-| `vela_resume_workflow` | 部署与工作流 | 恢复挂起的工作流（审批放行） | `.../resume` |
-| `vela_terminate_workflow` | 部署与工作流 | 终止执行中的工作流（MRTR 确认） | `.../terminate` |
-| `vela_rollback_application` | 应用 | 回滚到指定版本（MRTR 确认） | `.../rollback` |
+| `vela_deploy_application` | 应用 | 触发部署（异步，需人工确认） | `POST .../deploy` |
+| `vela_resume_workflow` | 部署与工作流 | 恢复挂起的工作流（需人工确认） | `.../resume` |
+| `vela_terminate_workflow` | 部署与工作流 | 终止执行中的工作流（需人工确认） | `.../terminate` |
+| `vela_rollback_application` | 应用 | 回滚到指定版本（需人工确认） | `.../rollback` |
 | `vela_create_trigger` | 触发器 | 创建 Webhook 触发器（返回 token 与触发地址） | `POST .../triggers` |
 
 > **未提供的高危操作**：删除应用、回收环境、启用/禁用插件、删除触发器**未实现为工具**，
@@ -463,10 +463,10 @@ prod-cluster 这个目标在哪些项目里可用？帮我确认 team-a 项目�
 ```
 （`vela_list_projects` + `vela_list_project_targets`）
 
-> 回滚 / 终止工作流等危险操作通过 MRTR 确认机制要求用户二次确认，避免对话中的误操作直接落到集群。
+> 部署、回滚、恢复/终止工作流、创建触发器等写操作通过 MCP 2.0 `Resolve` + `Elicit` 机制要求用户二次确认，避免对话中的误操作直接落到集群。
 > 删除应用、回收环境、启用/禁用插件等高危操作未提供工具，请在 VelaUX 控制台或 `vela` CLI 中人工执行。
 >
-> **MRTR 确认**：`vela_rollback_application` 和 `vela_terminate_workflow` 执行前会通过 MCP 2.0 Elicitation 弹出确认表单，需用户明确同意后才执行。若客户端不支持 Elicitation（如 stdio 模式），则降级为直接执行。
+> **写前确认**：5 个写操作（`deploy` / `rollback` / `resume` / `terminate` / `create_trigger`）执行前会通过 MCP 2.0 Elicitation 弹出确认表单，展示应用名、版本、工作流等上下文信息，需用户明确勾选并同意后才执行。`confirm` 参数由 SDK 从 `inputSchema` 中剔除，AI 不可见也无法伪造。客户端不支持 Elicitation 时由 SDK 直接拒绝调用（fail-closed），不会降级为直接执行。
 
 ## 开发
 
