@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### 破坏性变更
+
+- **默认改为只读模式**：`VELA_READ_ONLY` 默认值由 `false` 改为 `true`。
+  未显式配置该变量的部署，升级后 7 个写工具将不再注册（不出现在 `tools/list` 中），
+  Agent 既看不到也无法调用。**如需保留写能力，请显式设置 `VELA_READ_ONLY=false`**
+  - 依据：默认值面对的是不知情的使用者。知道自己需要写权限的人会显式配置；
+    不知道的人装上即直连生产 VelaUX，而 `deploy` 会让 Pod 真实起在集群里。
+    "爆炸半径可控 + 可回滚"不构成默认可写的理由——回滚是出事之后的补救，
+    默认只读是出事之前的预防
+  - 同时与 mcp-apisix（默认 `true`）保持一致，消除"同族 MCP 项目哪个默认能写"的认知负担
+  - 影响范围：`src/mcp_kubevela/server.py`、`.env.example`、`docker-compose.yml`、`README.md`
+
+### 测试
+
+- 新增 `write_mode` fixture（以 `VELA_READ_ONLY=false` 重载 server 模块），
+  依赖写工具的用例改为在该 fixture 下执行
+- 新增 `test_default_is_read_only`：断言默认仅注册 21 个只读工具、写工具全部排除
+- `test_all_tools_registered` 改为在写模式下断言 28 个工具全注册
+
 ## 0.4.0 (2026-07-31)
 
 ### 破坏性变更

@@ -1,5 +1,7 @@
 """server 基础测试：工具注册、只读模式、错误处理"""
 
+import importlib
+
 import httpx2 as httpx
 import pytest
 
@@ -42,16 +44,39 @@ EXPECTED_WRITE = {
 }
 
 
-async def test_all_tools_registered():
+@pytest.fixture
+def write_mode(monkeypatch):
+    """以写模式（VELA_READ_ONLY=false）重载 server 模块。
+
+    写工具在模块导入期按 VELA_READ_ONLY 决定是否注册（注册期排除），
+    因此必须重载模块才能让写工具出现在 mcp 注册表中。
+    用完恢复默认（只读），避免污染其他测试。
+    """
+    monkeypatch.setenv("VELA_READ_ONLY", "false")
+    module = importlib.reload(server)
+    yield module
+    monkeypatch.delenv("VELA_READ_ONLY", raising=False)
+    importlib.reload(server)
+
+
+async def test_default_is_read_only():
+    """默认（未设置 VELA_READ_ONLY）为只读模式：仅注册只读工具，写工具全部排除。"""
     tools = {t.name for t in await server.mcp.list_tools()}
     assert EXPECTED_READONLY <= tools
-    # 默认非只读模式下写工具也应注册
+    assert not (EXPECTED_WRITE & tools), "默认只读模式下不应注册任何写工具"
+    assert len(tools) == len(EXPECTED_READONLY)
+
+
+async def test_all_tools_registered(write_mode):
+    """显式 VELA_READ_ONLY=false 时，只读与写工具全部注册。"""
+    tools = {t.name for t in await write_mode.mcp.list_tools()}
+    assert EXPECTED_READONLY <= tools
     assert EXPECTED_WRITE <= tools
     assert len(tools) == len(EXPECTED_READONLY) + len(EXPECTED_WRITE)
 
 
-async def test_readonly_annotations():
-    for tool in await server.mcp.list_tools():
+async def test_readonly_annotations(write_mode):
+    for tool in await write_mode.mcp.list_tools():
         annotations = tool.annotations
         assert annotations is not None, tool.name
         if tool.name in EXPECTED_READONLY:
@@ -60,10 +85,10 @@ async def test_readonly_annotations():
             assert annotations.read_only_hint is False, tool.name
 
 
-async def test_flat_annotated_params():
+async def test_flat_annotated_params(write_mode):
     """所有工具均使用扁平 Annotated 入参模式，不再有 params 包装对象，
     也不应暴露 ctx 参数（MCP SDK 自动跳过 Context 类型）。"""
-    tools = await server.mcp.list_tools()
+    tools = await write_mode.mcp.list_tools()
     for tool in tools:
         props = set(tool.input_schema.get("properties", {}).keys())
         # vela_velaql_query 的 params 是一个真正的扁平参数（dict[str, Any]），
@@ -73,9 +98,9 @@ async def test_flat_annotated_params():
         assert "ctx" not in props, f"{tool.name} 暴露了 ctx 参数"
 
 
-async def test_flat_params_required_fields():
+async def test_flat_params_required_fields(write_mode):
     """抽样校验扁平参数的 required 字段与约束迁移正确。"""
-    tools = {t.name: t for t in await server.mcp.list_tools()}
+    tools = {t.name: t for t in await write_mode.mcp.list_tools()}
 
     # 全部必填的工具
     assert set(tools["vela_get_workflow_logs"].input_schema["required"]) == {
@@ -90,9 +115,9 @@ async def test_flat_params_required_fields():
     assert "ctx" not in tools["vela_create_application"].input_schema.get("properties", {})
 
 
-async def test_flat_params_field_constraints():
+async def test_flat_params_field_constraints(write_mode):
     """抽样校验 Field 约束（min_length / ge / le / pattern）已迁移到扁平参数。"""
-    tools = {t.name: t for t in await server.mcp.list_tools()}
+    tools = {t.name: t for t in await write_mode.mcp.list_tools()}
 
     # app_name 的 min_length=1 约束应保留
     app_name_schema = tools["vela_get_application"].input_schema["properties"]["app_name"]

@@ -10,6 +10,7 @@ KubeVela MCP Server - 让 AI 助手能够查询和管理 [KubeVela](https://kube
 - **接口认证**：HTTP 传输支持 Bearer Token 保护，未授权请求返回 `401`
 - **JWT 自动管理**：用户名/密码登录换取 accessToken，`401` 时自动 refresh / 重登录并重放请求，无需手工维护 Token
 - **KubeVela 原生概念**：直接以 `project / application / env / target / workflow / addon` 组织交付，读写一体
+- **默认只读**：写工具默认不注册，需显式 `VELA_READ_ONLY=false` 开启，避免未经配置即直连生产环境
 - **危险操作防护**：回滚/终止工作流等高危操作带 `destructiveHint` 注解并通过 MRTR 确认；删除应用、回收环境、禁用插件等高危能力**未提供工具**，从根源上杜绝误操作
 - **破坏性操作 MRTR 确认**：回滚应用、终止工作流等高危操作通过 MCP 2.0 Elicitation 机制弹出确认表单，需用户明确同意后才执行；若客户端不支持 Elicitation（如 stdio 模式），则降级为直接执行
 - **MCP Resources**：以 `vela://` URI 暴露系统信息、项目列表、环境列表、集群列表等只读元数据，客户端可直接读取
@@ -46,6 +47,9 @@ KubeVela MCP Server - 让 AI 助手能够查询和管理 [KubeVela](https://kube
   }
 }
 ```
+
+> 本服务**默认只读**（`VELA_READ_ONLY=true`），写工具不注册。上述示例显式设为 `false`
+> 以启用创建 / 部署 / 回滚等写能力；仅需查询时删掉该项即可。
 
 > Cursor、OpenCode、Claude Desktop 等客户端的配置格式相同，核心均为 `command: uvx` + `args: ["mcp-kubevela"]`，按各客户端语法填入 `VELA_*` 环境变量即可。
 
@@ -149,10 +153,11 @@ docker run -d -p 8080:8080 \
 > **未提供的高危操作**：删除应用、回收环境、启用/禁用插件、删除触发器**未实现为工具**，
 > 此类操作请通过 VelaUX 控制台或 `vela` CLI 人工执行。
 >
-> **只读 / 写的区别**：「类型 = 只读」的 21 个工具在 `VELA_READ_ONLY=true` 下**仍然可用**；
-> 「类型 = 写」的 7 个工具在该模式下会被**完全排除**——不出现在 `tools/list` 中，
+> **只读 / 写的区别**：「类型 = 只读」的 21 个工具在只读模式下**仍然可用**；
+> 「类型 = 写」的 7 个工具会被**完全排除**——不出现在 `tools/list` 中，
 > Agent 既看不到也无法调用（注册期排除，非运行期拦截）。
-> 这样生产环境开启只读后，Agent 只能查询、绝无意外变更交付的风险。
+> **只读为默认行为**，因此未显式设置 `VELA_READ_ONLY=false` 的部署，Agent 只能查询、
+> 绝无意外变更交付的风险。
 >
 > 部署为**异步语义**：`vela_deploy_application` 触发后立即返回部署记录标识，
 > 用 `vela_list_workflow_records` / `vela_get_workflow_logs` 轮询进度与日志。
@@ -180,7 +185,7 @@ docker run -d -p 8080:8080 \
 | `VELA_USERNAME` | 登录用户名（必填） | - |
 | `VELA_PASSWORD` | 登录密码（必填） | - |
 | `VELA_TIMEOUT` | 请求超时（秒） | `30` |
-| `VELA_READ_ONLY` | 只读模式，排除全部写工具（适合生产环境） | `false` |
+| `VELA_READ_ONLY` | 只读模式，排除全部写工具。**默认只读**，需写能力时显式设为 `false` | `true` |
 | `VELA_INSECURE` | 跳过 TLS 证书验证，用于自签名证书环境（详见下方说明） | `false` |
 
 > 认证凭证只需用户名/密码：客户端首次请求时自动调用 `POST /api/v1/auth/login`
@@ -196,12 +201,14 @@ KubeVela 的交付组织层级为：**项目（project）> 应用（application�
 
 ### 只读模式
 
-设置 `VELA_READ_ONLY=true` 可排除全部写工具，仅允许查询，适合生产环境使用：
+**本服务默认即只读模式**（`VELA_READ_ONLY=true`），全部写工具不注册，仅允许查询，可直接用于生产环境。
+
+如需写能力（创建 / 部署 / 回滚 / 终止工作流 / 创建触发器），须显式关闭只读：
 
 ```json
 {
   "env": {
-    "VELA_READ_ONLY": "true"
+    "VELA_READ_ONLY": "false"
   }
 }
 ```

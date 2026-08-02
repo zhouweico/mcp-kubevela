@@ -7,7 +7,7 @@
     VELA_URL        VelaUX 地址（默认 http://localhost:8000）
     VELA_USERNAME   登录用户名（必填）
     VELA_PASSWORD   登录密码（必填）
-    VELA_READ_ONLY  true 时只注册只读工具
+    VELA_READ_ONLY  只读模式，排除全部写工具（默认 true；需写能力时显式设为 false）
     MCP_TRANSPORT   stdio（默认）/ sse / streamable-http
 """
 
@@ -62,7 +62,8 @@ mcp = MCPServer(
     instructions=(
         "KubeVela (VelaUX) 应用交付平台 MCP Server。"
         "通过 VelaUX REST API 操作应用、工作流、环境、插件、集群等资源。"
-        "写操作（创建/部署/回滚/终止）在 VELA_READ_ONLY=true 时不可用。"
+        "写操作（创建/部署/回滚/终止）默认不可用，"
+        "需显式设置 VELA_READ_ONLY=false 开启。"
     ),
     lifespan=app_lifespan,
 )
@@ -1219,7 +1220,7 @@ async def resource_clusters() -> str:
 
 
 # ==================== 写工具（只读模式下不注册） ====================
-_read_only = os.getenv("VELA_READ_ONLY", "false").lower() == "true"
+_read_only = os.getenv("VELA_READ_ONLY", "true").lower() == "true"
 
 if not _read_only:
 

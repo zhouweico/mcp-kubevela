@@ -21,7 +21,7 @@ services:
       VELA_USERNAME: "${VELA_USERNAME:-}"
       VELA_PASSWORD: "${VELA_PASSWORD:-}"
       VELA_TIMEOUT: "${VELA_TIMEOUT:-30}"
-      VELA_READ_ONLY: "${VELA_READ_ONLY:-false}"
+      VELA_READ_ONLY: "${VELA_READ_ONLY:-true}"
     healthcheck:
       test:
         - "CMD"
