@@ -1,0 +1,307 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 tag（如 v0.4.0），用于重跑失败的发布"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------
+  # 前置关卡：tag 与代码内版本号必须一致，且测试/lint 必须通过。
+  # 任一不满足则整个发布中止，避免把错版本推向不可撤回的 PyPI。
+  # ---------------------------------------------------------------
+  verify:
+    name: Verify version & quality
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve tag and version
+        id: resolve
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "解析结果：tag=$TAG version=$VERSION"
+
+      - name: Assert tag matches pyproject.toml and __init__.py
+        run: |
+          TAG_VERSION="${{ steps.resolve.outputs.version }}"
+          PY_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          INIT_VERSION=$(grep -m1 '^__version__ = ' src/mcp_kubevela/__init__.py | sed -E 's/__version__ = "(.*)"/\1/')
+          echo "tag=$TAG_VERSION pyproject=$PY_VERSION __init__=$INIT_VERSION"
+          if [ "$TAG_VERSION" != "$PY_VERSION" ] || [ "$TAG_VERSION" != "$INIT_VERSION" ]; then
+            echo "::error::版本号不一致，发布中止。tag=$TAG_VERSION pyproject=$PY_VERSION __init__=$INIT_VERSION"
+            exit 1
+          fi
+
+      - name: Assert CHANGELOG has an entry for this version
+        run: |
+          VERSION="${{ steps.resolve.outputs.version }}"
+          if ! grep -q "^## $VERSION" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md 缺少 ## $VERSION 条目，发布中止"
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Ruff
+        run: uv run ruff check src/ tests/
+
+      - name: Mypy
+        run: uv run mypy src/
+
+      - name: Pytest
+        run: uv run pytest tests/ -q
+
+  # ---------------------------------------------------------------
+  # 多架构镜像：GitHub runner 网络无限制，QEMU 交叉编译 arm64。
+  # ---------------------------------------------------------------
+  docker:
+    name: Build & push image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.verify.outputs.tag }}
+            type=raw,value=latest
+
+      - name: Build & push (amd64 + arm64)
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify multi-arch manifest
+        run: |
+          VERSION="${{ needs.verify.outputs.version }}"
+          echo "=== $VERSION manifest ==="
+          docker buildx imagetools inspect "${{ env.IMAGE_NAME }}:$VERSION"
+          docker buildx imagetools inspect --raw "${{ env.IMAGE_NAME }}:$VERSION" \
+            | jq -r '.manifests[]? | select(.platform.os=="linux") | .platform.architecture' \
+            | sort -u > /tmp/arches
+          cat /tmp/arches
+          grep -qx amd64 /tmp/arches
+          grep -qx arm64 /tmp/arches
+
+      - name: Smoke test both architectures
+        run: |
+          VERSION="${{ needs.verify.outputs.version }}"
+          for arch in amd64 arm64; do
+            echo "=== smoke test linux/$arch ==="
+            printf '%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+              | timeout 60 docker run --rm -i --platform "linux/$arch" \
+                  -e MCP_TRANSPORT=stdio \
+                  -e VELA_URL=http://127.0.0.1:8000 \
+                  -e VELA_USERNAME=ci-dummy \
+                  -e VELA_PASSWORD=ci-dummy \
+                  "${{ env.IMAGE_NAME }}:$VERSION" \
+              | grep -q '"serverInfo"'
+            echo "linux/$arch OK"
+          done
+
+  # ---------------------------------------------------------------
+  # PyPI：Trusted Publisher (OIDC)，无需长期 token。
+  # 独立 job 以隔离 id-token 权限。
+  # ---------------------------------------------------------------
+  pypi:
+    name: Publish to PyPI
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-kubevela/${{ needs.verify.outputs.version }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build sdist & wheel
+        run: uv build
+
+      - name: Check distributions
+        run: |
+          uvx twine check dist/*
+          ls -la dist/
+          test -f "dist/mcp_kubevela-${{ needs.verify.outputs.version }}-py3-none-any.whl"
+          test -f "dist/mcp_kubevela-${{ needs.verify.outputs.version }}.tar.gz"
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
+
+  # ---------------------------------------------------------------
+  # GitHub Release：等镜像与 PyPI 都成功后再发，避免 Release 已存在
+  # 但产物缺失的不一致状态。
+  # ---------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: [verify, docker, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build distributions for release assets
+        run: uv build
+
+      - name: Extract release notes from CHANGELOG
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+
+          version = os.environ["VERSION"]
+          tag = os.environ["TAG"]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+
+          pattern = rf"## {re.escape(version)}[^\n]*\n(.*?)(?=\n## |\Z)"
+          match = re.search(pattern, text, re.S)
+          if not match:
+              raise SystemExit(f"CHANGELOG.md 中找不到 {version} 条目")
+          body = match.group(1).strip()
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tags = re.findall(r"^## ([0-9]+\.[0-9]+\.[0-9]+)", text, re.M)
+          idx = tags.index(version)
+          prev = tags[idx + 1] if idx + 1 < len(tags) else None
+          compare = (
+              f"https://github.com/{repo}/compare/v{prev}...{tag}"
+              if prev
+              else f"https://github.com/{repo}/commits/{tag}"
+          )
+
+          notes = f"""{body}
+
+          ---
+
+          **完整变更**：{compare}
+
+          ### 安装
+
+          ```bash
+          pip install mcp-kubevela=={version}
+          ```
+
+          ```bash
+          docker pull ghcr.io/{repo}:{version}
+          ```
+          """
+          notes = "\n".join(line[10:] if line.startswith(" " * 10) else line for line in notes.split("\n"))
+          pathlib.Path("release_notes.md").write_text(notes, encoding="utf-8")
+          print(notes)
+          PY
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，更新内容与附件"
+            gh release edit "$TAG" --title "$TAG" --notes-file release_notes.md
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file release_notes.md dist/*
+          fi
+
+  summary:
+    name: Release summary
+    needs: [verify, docker, pypi, release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write summary
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          {
+            echo "## Release $TAG"
+            echo ""
+            echo "| 步骤 | 结果 |"
+            echo "|---|---|"
+            echo "| 版本与质量校验 | ${{ needs.verify.result }} |"
+            echo "| GHCR 多架构镜像 | ${{ needs.docker.result }} |"
+            echo "| PyPI 发布 | ${{ needs.pypi.result }} |"
+            echo "| GitHub Release | ${{ needs.release.result }} |"
+            echo ""
+            echo "- 镜像：\`docker pull ${{ env.IMAGE_NAME }}:$VERSION\`"
+            echo "- 包：\`pip install mcp-kubevela==$VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"

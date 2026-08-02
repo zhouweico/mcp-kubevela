@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Ruff
+        run: uv run ruff check src/ tests/
+
+      - name: Mypy
+        run: uv run mypy src/
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --python ${{ matrix.python-version }}
+
+      - name: Pytest
+        run: uv run --python ${{ matrix.python-version }} pytest tests/ -q
+
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build sdist & wheel
+        run: uv build
+
+      - name: Verify metadata
+        run: |
+          uvx twine check dist/*
+          python -c "
+          import pathlib, re, sys
+          pyproject = pathlib.Path('pyproject.toml').read_text(encoding='utf-8')
+          init = pathlib.Path('src/mcp_kubevela/__init__.py').read_text(encoding='utf-8')
+          pv = re.search(r'^version = \"([^\"]+)\"', pyproject, re.M).group(1)
+          iv = re.search(r'^__version__ = \"([^\"]+)\"', init, re.M).group(1)
+          print(f'pyproject={pv} __init__={iv}')
+          sys.exit(0 if pv == iv else 'version mismatch between pyproject.toml and __init__.py')
+          "
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  docker:
+    name: Docker build (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (amd64 only, load for smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: mcp-kubevela:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (stdio initialize handshake)
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | timeout 30 docker run --rm -i \
+                -e MCP_TRANSPORT=stdio \
+                -e VELA_URL=http://127.0.0.1:8000 \
+                -e VELA_USERNAME=ci-dummy \
+                -e VELA_PASSWORD=ci-dummy \
+                mcp-kubevela:ci \
+            | tee /tmp/out.json
+          grep -q '"serverInfo"' /tmp/out.json
