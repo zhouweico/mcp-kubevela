@@ -1618,8 +1618,23 @@ def _run_http(transport: str) -> None:
     """以 HTTP 方式（sse / streamable-http）运行，并按需启用 Token 认证。"""
     import uvicorn
 
-    host = os.getenv("MCP_HOST", "0.0.0.0")
+    host = os.getenv("MCP_HOST", "127.0.0.1")
     port = int(os.getenv("MCP_PORT", "8080"))
+
+    # 监听回环时由 SDK 自动开启 DNS 重绑定防护（Host/Origin 校验）；
+    # 对外暴露时显式关闭防护，安全依赖 MCP_AUTH_TOKEN Bearer 认证。
+    _localhost = ("127.0.0.1", "localhost", "::1")
+    if host in _localhost:
+        _sec = None
+    else:
+        logger.warning(
+            "安全提示：MCP_HOST=%s 将对所有网络接口开放，已关闭 DNS 重绑定防护"
+            "（Host 校验）。请务必配置 MCP_AUTH_TOKEN 启用 Bearer 认证，"
+            "否则服务可被未授权访问！",
+            host,
+        )
+        from mcp.server.transport_security import TransportSecuritySettings
+        _sec = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
     if transport == "sse":
         warnings.warn(
@@ -1629,11 +1644,11 @@ def _run_http(transport: str) -> None:
             stacklevel=2,
         )
         logger.warning("SSE 传输已废弃，建议切换至 streamable-http")
-        app: Any = mcp.sse_app()
+        app: Any = mcp.sse_app(host=host, transport_security=_sec)
         endpoint = "/sse"
     else:
         stateless = os.getenv("MCP_STATELESS_HTTP", "false").lower() == "true"
-        app = mcp.streamable_http_app(stateless_http=stateless)
+        app = mcp.streamable_http_app(stateless_http=stateless, host=host, transport_security=_sec)
         endpoint = "/mcp"
         if stateless:
             logger.info("已启用 Stateless HTTP 模式（每次请求独立，无会话状态）")
@@ -1674,7 +1689,7 @@ def main() -> None:
         - streamable-http：Streamable HTTP 传输
 
     HTTP 传输相关环境变量：
-        - MCP_HOST：监听地址，默认 0.0.0.0
+        - MCP_HOST：监听地址，默认 127.0.0.1（仅回环），对外暴露用 0.0.0.0 并务必配置 MCP_AUTH_TOKEN
         - MCP_PORT：监听端口，默认 8080（避免与 VelaUX 默认 8000 冲突）
         - MCP_AUTH_TOKEN：设置后启用 Bearer Token 认证
         - MCP_LOG_LEVEL：日志级别，默认 info
